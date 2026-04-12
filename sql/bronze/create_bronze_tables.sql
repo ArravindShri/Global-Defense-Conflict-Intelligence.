@@ -1,0 +1,154 @@
+Here's the formatted version — paste this into `sql/bronze/create_bronze_tables.sql`:
+
+```sql
+-- ============================================================================
+-- BRONZE LAYER: Raw Data Tables
+-- Global Defense & Conflict Intelligence Dashboard
+-- 
+-- 7 tables loaded from 5 external sources:
+--   - SIPRI Arms Transfers Database
+--   - SIPRI Military Expenditure (3 metrics)
+--   - SIPRI Top 100 Arms-Producing Companies
+--   - ACLED Political Violence & Conflict Events
+--   - World Bank Development Indicators (API)
+--
+-- Bronze layer stores data as-is from source with minimal transformation.
+-- Cleaning, standardization, and enrichment happen in Silver layer.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 1. SIPRI Arms Transfers (source: SIPRI Arms Transfers Database)
+-- Individual arms trade deals between countries (1998-2024)
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_arms_transfers (
+    id                INT PRIMARY KEY,
+    trade_id          INT,
+    supplier          VARCHAR(100),
+    recipient         VARCHAR(100),
+    order_date        DATE,
+    orderYrEst        BIT,
+    quantity          INT,
+    delivery_date     DATE,
+    designation       VARCHAR(150),
+    description       VARCHAR(255),
+    category          VARCHAR(100),
+    status            VARCHAR(50),
+    sipri_estimate    DECIMAL(12,2),
+    tiv_deal_unit     DECIMAL(12,2),
+    tiv_delivery      DECIMAL(12,2),
+    local_production  BIT,
+    source_lat        DECIMAL(9,6),
+    source_lng        DECIMAL(9,6),
+    target_lat        DECIMAL(9,6),
+    target_lng        DECIMAL(9,6)
+);
+
+-- ----------------------------------------------------------------------------
+-- 2. SIPRI Top 100 Arms-Producing Companies (source: SIPRI)
+-- Annual ranking of world's largest defense companies by arms revenue
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_arms_industry (
+    rank_id           INT,
+    Company_name      VARCHAR(50),
+    Country           VARCHAR(50),
+    arms_revenue      DECIMAL(10,4),
+    total_revenue     DECIMAL(10,4),
+    arms_revenue_pct  DECIMAL(10,4),
+    year              INT,
+    PRIMARY KEY (rank_id, year)
+);
+
+-- ----------------------------------------------------------------------------
+-- 3. ACLED Conflict Events (source: ACLED Regional Aggregated Data)
+-- Weekly conflict events across 6 regions, merged into single table
+-- Regions: Asia-Pacific, Middle East, Africa, Europe & Central Asia,
+--          US & Canada, Latin America & Caribbean
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_acled_conflict_events (
+    ID                    INT,
+    Region                VARCHAR(50),
+    Country               VARCHAR(50),
+    Admin1                VARCHAR(50),
+    Event_type            VARCHAR(50),
+    Sub_event_type        VARCHAR(50),
+    Events                INT,
+    Fatalities            INT,
+    Population_exposure   BIGINT,
+    Disorder_Type         VARCHAR(50),
+    Week                  DATE,
+    Centroid_latitude     DECIMAL(10,4),
+    Centroid_longitude    DECIMAL(10,4),
+    PRIMARY KEY (ID, Region)
+);
+
+-- ----------------------------------------------------------------------------
+-- 4. SIPRI Military Expenditure - Current USD (source: SIPRI-MILEX-DATA)
+-- Wide format: one row per country, columns for each year (2001-2024)
+-- Values in US$ millions
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_milex_current_usd (
+    Country    VARCHAR(100) PRIMARY KEY,
+    Notes      VARCHAR(50),
+    y_2001 DECIMAL(10,4), y_2002 DECIMAL(10,4), y_2003 DECIMAL(10,4),
+    y_2004 DECIMAL(10,4), y_2005 DECIMAL(10,4), y_2006 DECIMAL(10,4),
+    y_2007 DECIMAL(10,4), y_2008 DECIMAL(10,4), y_2009 DECIMAL(10,4),
+    y_2010 DECIMAL(10,4), y_2011 DECIMAL(10,4), y_2012 DECIMAL(10,4),
+    y_2013 DECIMAL(10,4), y_2014 DECIMAL(10,4), y_2015 DECIMAL(10,4),
+    y_2016 DECIMAL(10,4), y_2017 DECIMAL(10,4), y_2018 DECIMAL(10,4),
+    y_2019 DECIMAL(10,4), y_2020 DECIMAL(10,4), y_2021 DECIMAL(10,4),
+    y_2022 DECIMAL(10,4), y_2023 DECIMAL(10,4), y_2024 DECIMAL(10,4)
+);
+
+-- ----------------------------------------------------------------------------
+-- 5. SIPRI Military Expenditure - Share of GDP (source: SIPRI-MILEX-DATA)
+-- Wide format: military spending as percentage of GDP per country per year
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_milex_share_gdp (
+    Country    VARCHAR(100) PRIMARY KEY,
+    Notes      VARCHAR(50),
+    y_2001 DECIMAL(10,4), y_2002 DECIMAL(10,4), y_2003 DECIMAL(10,4),
+    y_2004 DECIMAL(10,4), y_2005 DECIMAL(10,4), y_2006 DECIMAL(10,4),
+    y_2007 DECIMAL(10,4), y_2008 DECIMAL(10,4), y_2009 DECIMAL(10,4),
+    y_2010 DECIMAL(10,4), y_2011 DECIMAL(10,4), y_2012 DECIMAL(10,4),
+    y_2013 DECIMAL(10,4), y_2014 DECIMAL(10,4), y_2015 DECIMAL(10,4),
+    y_2016 DECIMAL(10,4), y_2017 DECIMAL(10,4), y_2018 DECIMAL(10,4),
+    y_2019 DECIMAL(10,4), y_2020 DECIMAL(10,4), y_2021 DECIMAL(10,4),
+    y_2022 DECIMAL(10,4), y_2023 DECIMAL(10,4), y_2024 DECIMAL(10,4)
+);
+
+-- ----------------------------------------------------------------------------
+-- 6. SIPRI Military Expenditure - Share of Govt Spending (source: SIPRI-MILEX)
+-- Wide format: military spending as % of total government expenditure
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_milex_share_govt_spending (
+    Country        VARCHAR(100) PRIMARY KEY,
+    Notes          VARCHAR(50),
+    Reporting_year VARCHAR(50),
+    y_2001 DECIMAL(10,4), y_2002 DECIMAL(10,4), y_2003 DECIMAL(10,4),
+    y_2004 DECIMAL(10,4), y_2005 DECIMAL(10,4), y_2006 DECIMAL(10,4),
+    y_2007 DECIMAL(10,4), y_2008 DECIMAL(10,4), y_2009 DECIMAL(10,4),
+    y_2010 DECIMAL(10,4), y_2011 DECIMAL(10,4), y_2012 DECIMAL(10,4),
+    y_2013 DECIMAL(10,4), y_2014 DECIMAL(10,4), y_2015 DECIMAL(10,4),
+    y_2016 DECIMAL(10,4), y_2017 DECIMAL(10,4), y_2018 DECIMAL(10,4),
+    y_2019 DECIMAL(10,4), y_2020 DECIMAL(10,4), y_2021 DECIMAL(10,4),
+    y_2022 DECIMAL(10,4), y_2023 DECIMAL(10,4), y_2024 DECIMAL(10,4)
+);
+
+-- ----------------------------------------------------------------------------
+-- 7. World Bank Development Indicators (source: World Bank API v2)
+-- Fetched via Python script with pagination
+-- 6 indicators: GDP, Military %, Education %, Healthcare %, Debt %, Population
+-- ----------------------------------------------------------------------------
+CREATE TABLE bronze_world_bank_indicators (
+    country_code    VARCHAR(50),
+    country_name    VARCHAR(50),
+    indicator_code  VARCHAR(50),
+    indicator_name  VARCHAR(50),
+    year            INT,
+    value           DECIMAL(16,4),
+    api_fetched_at  DATETIME,
+    PRIMARY KEY (indicator_name, country_name, year)
+);
+```
+
+Commit with message `data: add bronze layer table schemas with documentation`.
