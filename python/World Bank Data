@@ -1,0 +1,94 @@
+"""
+Bronze Layer: World Bank API Ingestion Script
+Global Defense & Conflict Intelligence Dashboard
+
+Fetches 6 development indicators from the World Bank API v2 for all countries
+(2001-2024) with automatic pagination handling. Outputs CSV for SSMS import.
+
+Indicators:
+    - NY.GDP.MKTP.CD       → GDP (current US$)
+    - MS.MIL.XPND.GD.ZS   → Military expenditure (% of GDP)
+    - SE.XPD.TOTL.GD.ZS    → Education expenditure (% of GDP)
+    - SH.XPD.CHEX.GD.ZS    → Healthcare expenditure (% of GDP)
+    - GC.DOD.TOTL.GD.ZS    → Government debt (% of GDP)
+    - SP.POP.TOTL           → Total population
+
+Usage:
+    python bronze_world_bank_indicators.py
+
+Output:
+    bronze_world_bank_indicators.csv (ready for SSMS Import Flat File Wizard)
+"""
+
+import requests
+import csv
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+INDICATORS = [
+    "NY.GDP.MKTP.CD",
+    "MS.MIL.XPND.GD.ZS",
+    "SE.XPD.TOTL.GD.ZS",
+    "SH.XPD.CHEX.GD.ZS",
+    "GC.DOD.TOTL.GD.ZS",
+    "SP.POP.TOTL"
+]
+
+BASE_URL = "http://api.worldbank.org/v2/country/all/indicator/{}?date=2001:2024&format=json&per_page=5000"
+OUTPUT_FILE = "bronze_world_bank_indicators.csv"
+
+
+# ---------------------------------------------------------------------------
+# Fetch data with pagination
+# ---------------------------------------------------------------------------
+all_data = []
+fetch_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+for code in INDICATORS:
+    print(f"Fetching indicator: {code}...")
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        url = f"{BASE_URL.format(code)}&page={page}"
+        response = requests.get(url)
+        data = response.json()
+
+        if len(data) > 1 and data[1]:
+            # Update total pages on first request
+            if page == 1:
+                total_pages = data[0]['pages']
+                print(f"  Total pages to fetch: {total_pages}")
+
+            for row in data[1]:
+                country_code = row['countryiso3code'] if row['countryiso3code'] else "N/A"
+
+                all_data.append([
+                    country_code,
+                    row['country']['value'],
+                    row['indicator']['id'],
+                    row['indicator']['value'],
+                    row['date'],
+                    row['value'],
+                    fetch_time
+                ])
+
+        print(f"  Page {page} complete.")
+        page += 1
+
+
+# ---------------------------------------------------------------------------
+# Export to CSV
+# ---------------------------------------------------------------------------
+with open(OUTPUT_FILE, mode='w', newline='', encoding='utf-8') as file:
+    writer = csv.writer(file)
+    writer.writerow([
+        'country_code', 'country_name', 'indicator_code',
+        'indicator_name', 'year', 'value', 'api_fetched_at'
+    ])
+    writer.writerows(all_data)
+
+print(f"Success! {len(all_data)} rows saved to {OUTPUT_FILE}.")
