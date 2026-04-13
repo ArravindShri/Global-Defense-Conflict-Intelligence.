@@ -1,0 +1,607 @@
+-- ============================================================================
+-- GOLD LAYER: Business-Ready Analytics Tables
+-- Global Defense & Conflict Intelligence Dashboard
+--
+-- 7 tables powering 6 Tableau dashboard pages:
+--   - gold_trade_overview → Global Trade Overview page
+--   - gold_imports_analysis → Import Analysis page
+--   - gold_exports_analysis → Export Analysis page
+--   - gold_defense_partnerships → Defense Partnerships page
+--   - gold_conflict_events → Cause & Consequence page
+--   - gold_spending_tradeoffs → Cause & Consequence page
+--   - gold_top100_companies → Defense Juggernauts page
+--
+-- Key techniques: Window functions (LAG, ROW_NUMBER), CTEs, PIVOT/UNPIVOT,
+--                 Pearson correlation, multi-step UPDATE patterns,
+--                 NULLIF for division-safe calculations
+-- ============================================================================
+
+
+-- ============================================================================
+-- 1. GOLD TRADE OVERVIEW
+-- One row per country summarizing total imports, exports, trade balance,
+-- market share, and most recent YoY growth rates
+-- ============================================================================
+CREATE TABLE gold_trade_overview (
+    country_id              TINYINT PRIMARY KEY,
+    country_name            VARCHAR(50),
+    region                  VARCHAR(50),
+    total_imports_deals     INT,
+    total_exports_deals     INT,
+    trade_balance_deals     INT,
+    import_yoy_growth_pct   DECIMAL(10,2),
+    export_yoy_growth_pct   DECIMAL(10,2),
+    market_share_export_pct DECIMAL(10,2),
+    market_share_import_pct DECIMAL(10,2)
+);
+
+-- Step 1: Insert base counts using CTEs
+WITH import_deals AS (
+    SELECT COUNT(trade_id) AS total_imports, recipient_country_id AS country_id
+    FROM silver_arms_transfer 
+    GROUP BY recipient_country_id
+), 
+export_deals AS (
+    SELECT COUNT(trade_id) AS total_exports, supplier_country_id AS country_id
+    FROM silver_arms_transfer 
+    GROUP BY supplier_country_id
+)
+INSERT INTO gold_trade_overview (
+    country_id, country_name, region,
+    total_imports_deals, total_exports_deals, trade_balance_deals
+)
+SELECT 
+    sc.country_id,
+    sc.country_name,
+    sc.region,
+    ISNULL(imp.total_imports, 0),
+    ISNULL(exp.total_exports, 0),
+    ISNULL(exp.total_exports, 0) - ISNULL(imp.total_imports, 0)
+FROM silver_countries sc
+LEFT JOIN import_deals imp ON imp.country_id = sc.country_id
+LEFT JOIN export_deals exp ON exp.country_id = sc.country_id
+WHERE imp.total_imports IS NOT NULL OR exp.total_exports IS NOT NULL;
+
+-- Step 2: Calculate market share percentages
+UPDATE gold_trade_overview
+SET market_share_export_pct = CAST(total_exports_deals AS DECIMAL(10,2)) 
+        / NULLIF((SELECT SUM(total_exports_deals) FROM gold_trade_overview), 0) * 100,
+    market_share_import_pct = CAST(total_imports_deals AS DECIMAL(10,2)) 
+        / NULLIF((SELECT SUM(total_imports_deals) FROM gold_trade_overview), 0) * 100;
+
+-- Step 3: Calculate export YoY growth (most recent year)
+UPDATE gto
+SET export_yoy_growth_pct = sub.yoy
+FROM gold_trade_overview gto
+INNER JOIN (
+    SELECT country_id, yoy,
+           ROW_NUMBER() OVER (PARTITION BY country_id ORDER BY year DESC) AS rn
+    FROM (
+        SELECT country_id, year,
+            (deals - LAG(deals, 1) OVER (PARTITION BY country_id ORDER BY year))
+            / NULLIF(CAST(LAG(deals, 1) OVER (PARTITION BY country_id ORDER BY year) AS DECIMAL(10,2)), 0)
+            * 100 AS yoy
+        FROM (
+            SELECT supplier_country_id AS country_id, delivery_year AS year, COUNT(trade_id) AS deals
+            FROM silver_arms_transfer
+            GROUP BY supplier_country_id, delivery_year
+        ) base
+    ) growth
+) sub
+ON gto.country_id = sub.country_id
+WHERE sub.rn = 1;
+
+-- Step 4: Calculate import YoY growth (most recent year)
+UPDATE gto
+SET import_yoy_growth_pct = sub.yoy
+FROM gold_trade_overview gto
+INNER JOIN (
+    SELECT country_id, yoy,
+           ROW_NUMBER() OVER (PARTITION BY country_id ORDER BY year DESC) AS rn
+    FROM (
+        SELECT country_id, year,
+            (deals - LAG(deals, 1) OVER (PARTITION BY country_id ORDER BY year))
+            / NULLIF(CAST(LAG(deals, 1) OVER (PARTITION BY country_id ORDER BY year) AS DECIMAL(10,2)), 0)
+            * 100 AS yoy
+        FROM (
+            SELECT recipient_country_id AS country_id, delivery_year AS year, COUNT(trade_id) AS deals
+            FROM silver_arms_transfer
+            GROUP BY recipient_country_id, delivery_year
+        ) base
+    ) growth
+) sub
+ON gto.country_id = sub.country_id
+WHERE sub.rn = 1;
+
+
+-- ============================================================================
+-- 2. GOLD EXPORTS ANALYSIS
+-- Granular export data: supplier × recipient × weapon × year
+-- Enriched with political era context, market share, and YoY growth
+-- ============================================================================
+CREATE TABLE gold_exports_analysis (
+    supplier_country_id  TINYINT,
+    supplier_name        VARCHAR(50),
+    recipient_country_id TINYINT,
+    recipient_name       VARCHAR(50),
+    weapon_category      VARCHAR(50),
+    year                 INT,
+    deal_count           INT,
+    political_party      VARCHAR(50),
+    political_leader     VARCHAR(50),
+    era_label            VARCHAR(50),
+    yoy_growth_pct       DECIMAL(10,2),
+    market_share_pct     DECIMAL(10,2),
+    PRIMARY KEY (recipient_country_id, supplier_country_id, weapon_category, year),
+    FOREIGN KEY (recipient_country_id) REFERENCES silver_countries(country_id),
+    FOREIGN KEY (supplier_country_id)  REFERENCES silver_countries(country_id)
+);
+
+-- Step 1: Insert base deal counts with political era mapping
+INSERT INTO gold_exports_analysis (
+    supplier_country_id, supplier_name, recipient_country_id, recipient_name,
+    weapon_category, year, deal_count, political_party, political_leader
+)
+SELECT
+    sat.supplier_country_id,
+    sc_sup.country_name,
+    sat.recipient_country_id,
+    sc_rec.country_name,
+    swc.category_name,
+    sat.delivery_year,
+    COUNT(sat.trade_id),
+    spe.political_party,
+    spe.leader_name
+FROM silver_arms_transfer sat
+JOIN silver_countries sc_rec ON sc_rec.country_id = sat.recipient_country_id
+JOIN silver_countries sc_sup ON sc_sup.country_id = sat.supplier_country_id
+JOIN silver_weapon_categories swc ON swc.weapon_category_id = sat.weapon_category_id
+LEFT JOIN (
+    SELECT country_id, political_party, leader_name, start_year, 
+           ISNULL(end_year, 2025) AS end_year,
+           ROW_NUMBER() OVER (PARTITION BY country_id, start_year ORDER BY start_year DESC) AS rn
+    FROM silver_political_eras
+) spe
+ON sat.supplier_country_id = spe.country_id 
+AND sat.delivery_year >= spe.start_year 
+AND sat.delivery_year < spe.end_year
+AND spe.rn = 1
+GROUP BY 
+    sat.recipient_country_id, sc_rec.country_name,
+    sat.supplier_country_id, sc_sup.country_name,
+    swc.category_name, sat.delivery_year,
+    spe.political_party, spe.leader_name;
+
+-- Step 2: Set era labels
+UPDATE gea
+SET era_label = CAST(spe.start_year AS VARCHAR) + '-' + CAST(ISNULL(spe.end_year, 2025) AS VARCHAR) 
+    + ' (' + spe.political_party + ')'
+FROM gold_exports_analysis gea
+JOIN silver_political_eras spe
+ON gea.supplier_country_id = spe.country_id
+AND gea.year >= spe.start_year
+AND gea.year < ISNULL(spe.end_year, 2026);
+
+-- Step 3: Calculate market share per year
+UPDATE gea
+SET market_share_pct = CAST(gea.deal_count AS DECIMAL(10,2)) 
+    / NULLIF(sub.total_exports, 0) * 100
+FROM gold_exports_analysis gea
+INNER JOIN (
+    SELECT year, SUM(deal_count) AS total_exports
+    FROM gold_exports_analysis
+    GROUP BY year
+) sub
+ON gea.year = sub.year;
+
+-- Step 4: Calculate YoY growth using LAG window function
+UPDATE gea
+SET yoy_growth_pct = sub.yoy
+FROM gold_exports_analysis gea
+INNER JOIN (
+    SELECT supplier_country_id, recipient_country_id, weapon_category, year,
+        (deal_count - LAG(deal_count, 1) OVER (
+            PARTITION BY supplier_country_id, recipient_country_id, weapon_category 
+            ORDER BY year))
+        / NULLIF(CAST(LAG(deal_count, 1) OVER (
+            PARTITION BY supplier_country_id, recipient_country_id, weapon_category 
+            ORDER BY year) AS DECIMAL(10,2)), 0)
+        * 100 AS yoy
+    FROM gold_exports_analysis
+) sub
+ON gea.supplier_country_id = sub.supplier_country_id 
+AND gea.recipient_country_id = sub.recipient_country_id
+AND gea.weapon_category = sub.weapon_category
+AND gea.year = sub.year;
+
+
+-- ============================================================================
+-- 3. GOLD DEFENSE PARTNERSHIPS
+-- One row per supplier-recipient pair with partnership strength metrics,
+-- top weapon category, and coordinates for trade flow map
+-- ============================================================================
+CREATE TABLE gold_defense_partnerships (
+    supplier_country_id    TINYINT,
+    supplier_country_name  VARCHAR(50),
+    recipient_country_id   TINYINT,
+    recipient_country_name VARCHAR(50),
+    total_deals            INT,
+    years_active           INT,
+    partnership_strength   DECIMAL(10,2),
+    top_weapon_category    VARCHAR(50),
+    first_trade_year       INT,
+    last_trade_year        INT,
+    source_lat             DECIMAL(10,6),
+    source_lng             DECIMAL(10,6),
+    target_lat             DECIMAL(10,6),
+    target_lng             DECIMAL(10,6),
+    PRIMARY KEY (supplier_country_id, recipient_country_id)
+);
+
+-- Step 1: Insert partnership metrics
+INSERT INTO gold_defense_partnerships (
+    supplier_country_id, supplier_country_name,
+    recipient_country_id, recipient_country_name,
+    total_deals, years_active, partnership_strength,
+    first_trade_year, last_trade_year,
+    source_lat, source_lng, target_lat, target_lng
+)
+SELECT 
+    sat.supplier_country_id,
+    sc_sup.country_name,
+    sat.recipient_country_id,
+    sc_rep.country_name,
+    COUNT(sat.trade_id),
+    COUNT(DISTINCT sat.delivery_year),
+    CAST(COUNT(sat.trade_id) AS DECIMAL(10,2)) 
+        / NULLIF(COUNT(DISTINCT sat.delivery_year), 0),
+    MIN(sat.delivery_year),
+    MAX(sat.delivery_year),
+    sat.source_lat,
+    sat.source_lng,
+    sat.target_lat,
+    sat.target_lng
+FROM silver_arms_transfer sat 
+JOIN silver_countries sc_sup ON sc_sup.country_id = sat.supplier_country_id
+JOIN silver_countries sc_rep ON sc_rep.country_id = sat.recipient_country_id
+GROUP BY 
+    sat.supplier_country_id, sat.recipient_country_id,
+    sc_sup.country_name, sc_rep.country_name,
+    sat.source_lat, sat.source_lng, sat.target_lat, sat.target_lng;
+
+-- Step 2: Set top weapon category using ROW_NUMBER
+UPDATE gdp
+SET top_weapon_category = sub.category_name
+FROM gold_defense_partnerships gdp
+INNER JOIN (
+    SELECT supplier_country_id, recipient_country_id, category_name, deal_count,
+        ROW_NUMBER() OVER (
+            PARTITION BY supplier_country_id, recipient_country_id 
+            ORDER BY deal_count DESC
+        ) AS rn
+    FROM (
+        SELECT sat.supplier_country_id, sat.recipient_country_id, 
+               swc.category_name, COUNT(*) AS deal_count
+        FROM silver_arms_transfer sat
+        JOIN silver_weapon_categories swc ON swc.weapon_category_id = sat.weapon_category_id
+        GROUP BY sat.supplier_country_id, sat.recipient_country_id, swc.category_name
+    ) AS counts
+) sub
+ON gdp.supplier_country_id = sub.supplier_country_id 
+AND gdp.recipient_country_id = sub.recipient_country_id
+WHERE sub.rn = 1;
+
+
+-- ============================================================================
+-- 4. GOLD SPENDING TRADEOFFS
+-- Country-year level: military vs social spending with crowding index
+-- and YoY growth, combining World Bank + SIPRI MILEX data
+-- ============================================================================
+CREATE TABLE gold_spending_tradeoffs (
+    country_id           TINYINT,
+    country_name         VARCHAR(50),
+    region               VARCHAR(50),
+    year                 INT,
+    education_pct_gdp    DECIMAL(16,4),
+    healthcare_pct_gdp   DECIMAL(16,4),
+    govt_debt_pct_gdp    DECIMAL(16,4),
+    gdp_usd              DECIMAL(16,4),
+    population           BIGINT,
+    milex_current_usd    DECIMAL(16,4),
+    milex_share_gdp_pct  DECIMAL(16,4),
+    milex_share_govt_pct DECIMAL(16,4),
+    budget_crowding_index DECIMAL(10,2),
+    milex_yoy_growth_pct DECIMAL(10,2),
+    PRIMARY KEY (country_id, year),
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id)
+);
+
+-- Step 1: Insert World Bank base data
+INSERT INTO gold_spending_tradeoffs (
+    country_id, country_name, region, year,
+    education_pct_gdp, healthcare_pct_gdp,
+    govt_debt_pct_gdp, gdp_usd, population
+)
+SELECT 
+    sc.country_id, sc.country_name, sc.region, wb.year,
+    wb.education_pct_gdp, wb.healthcare_pct_gdp,
+    wb.govt_debt_pct_gdp, wb.gdp_usd, wb.population
+FROM silver_world_bank wb
+JOIN silver_countries sc ON sc.country_id = wb.country_id;
+
+-- Step 2: Pivot and merge SIPRI milex metrics
+UPDATE gst 
+SET milex_current_usd    = sub.[current_usd],
+    milex_share_gdp_pct  = sub.[share_of_gdp],
+    milex_share_govt_pct = sub.[share_of_govt_spending]
+FROM gold_spending_tradeoffs gst 
+INNER JOIN (
+    SELECT country_id, year, [current_usd], [share_of_gdp], [share_of_govt_spending]
+    FROM (
+        SELECT country_id, year, metric_type, value
+        FROM silver_milex
+    ) AS src
+    PIVOT (
+        MAX(value)
+        FOR metric_type IN ([current_usd], [share_of_gdp], [share_of_govt_spending])
+    ) AS pvt
+) sub
+ON gst.country_id = sub.country_id AND gst.year = sub.year;
+
+-- Step 3: Calculate Budget Crowding Index
+-- Formula: military share of govt spending / average of education + healthcare % GDP
+UPDATE gold_spending_tradeoffs
+SET budget_crowding_index = milex_share_govt_pct 
+    / NULLIF((education_pct_gdp + healthcare_pct_gdp) / 2, 0);
+
+-- Step 4: Calculate military spending YoY growth using LAG
+UPDATE gst
+SET milex_yoy_growth_pct = sub.yoy
+FROM gold_spending_tradeoffs gst
+INNER JOIN (
+    SELECT country_id, year,
+        (milex_current_usd - LAG(milex_current_usd, 1) OVER (PARTITION BY country_id ORDER BY year)) 
+        / NULLIF(LAG(milex_current_usd, 1) OVER (PARTITION BY country_id ORDER BY year), 0) 
+        * 100 AS yoy
+    FROM gold_spending_tradeoffs
+) sub
+ON gst.country_id = sub.country_id AND gst.year = sub.year;
+
+
+-- ============================================================================
+-- 5. GOLD CONFLICT EVENTS
+-- Country-year conflict summary with trend classification and
+-- Pearson correlation between conflict events and military spending
+-- ============================================================================
+CREATE TABLE gold_conflict_events (
+    country_id                    TINYINT,
+    country_name                  VARCHAR(50),
+    region                        VARCHAR(50),
+    year                          INT,
+    total_events                  INT,
+    total_fatalities              INT,
+    event_trend                   VARCHAR(50),
+    events_yoy_change_pct         INT,
+    spending_conflict_correlation DECIMAL(10,2),
+    PRIMARY KEY (country_id, year),
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id)
+);
+
+-- Step 1: Insert aggregated conflict data
+INSERT INTO gold_conflict_events (
+    country_id, country_name, region, year,
+    total_events, total_fatalities
+)
+SELECT 
+    sc.country_id, sc.country_name, sc.region, sav.year,
+    SUM(sav.total_events), 
+    SUM(sav.total_fatalities)
+FROM silver_acled_violence sav
+JOIN silver_countries sc ON sc.country_id = sav.country_id
+GROUP BY sc.country_id, sc.country_name, sc.region, sav.year;
+
+-- Step 2: Calculate events YoY change using LAG
+UPDATE gce
+SET events_yoy_change_pct = sub.yoy
+FROM gold_conflict_events gce 
+INNER JOIN (
+    SELECT country_id, year,
+        (total_events - LAG(total_events, 1) OVER (PARTITION BY country_id ORDER BY year)) 
+        / NULLIF(LAG(total_events, 1) OVER (PARTITION BY country_id ORDER BY year), 0) 
+        * 100 AS yoy
+    FROM gold_conflict_events
+) sub
+ON gce.country_id = sub.country_id AND gce.year = sub.year;
+
+-- Step 3: Classify trend direction
+UPDATE gold_conflict_events
+SET event_trend = 
+    CASE 
+        WHEN events_yoy_change_pct > 0 THEN 'Increasing'
+        WHEN events_yoy_change_pct < 0 THEN 'Decreasing'
+        ELSE 'Stable'
+    END;
+
+-- Step 4: Calculate Pearson correlation (events vs military spending)
+UPDATE gce
+SET spending_conflict_correlation = sub.correlation
+FROM gold_conflict_events gce
+INNER JOIN (
+    SELECT 
+        country_id,
+        (COUNT(*) * SUM(CAST(x AS FLOAT) * y) - SUM(CAST(x AS FLOAT)) * SUM(y)) 
+        / NULLIF(
+            SQRT(
+                (COUNT(*) * SUM(CAST(x AS FLOAT) * x) - SUM(CAST(x AS FLOAT)) * SUM(CAST(x AS FLOAT))) 
+                * (COUNT(*) * SUM(y * y) - SUM(y) * SUM(y))
+            ), 0
+        ) AS correlation
+    FROM (
+        SELECT 
+            gce2.country_id,
+            gce2.total_events AS x,
+            gst.milex_current_usd AS y
+        FROM gold_conflict_events gce2
+        JOIN gold_spending_tradeoffs gst 
+            ON gce2.country_id = gst.country_id AND gce2.year = gst.year
+        WHERE gce2.total_events IS NOT NULL AND gst.milex_current_usd IS NOT NULL
+    ) paired
+    GROUP BY country_id
+) sub
+ON gce.country_id = sub.country_id;
+
+
+-- ============================================================================
+-- 6. GOLD TOP 100 COMPANIES
+-- Denormalized company ranking with country and region context
+-- ============================================================================
+CREATE TABLE gold_top100_companies (
+    rank             INT PRIMARY KEY NOT NULL,
+    company_name     VARCHAR(50) NOT NULL,
+    country_name     VARCHAR(50) NOT NULL,
+    region           VARCHAR(50) NOT NULL,
+    arms_revenue     DECIMAL(10,2),
+    total_revenue    DECIMAL(10,2),
+    arms_revenue_pct DECIMAL(10,2),
+    year             INT
+);
+
+INSERT INTO gold_top100_companies (
+    rank, company_name, country_name, region,
+    arms_revenue, total_revenue, arms_revenue_pct, year
+)
+SELECT 
+    sai.rank, sai.company_name, sc.country_name, sc.region,
+    sai.arms_revenue, sai.total_revenue, sai.arms_revenue_pct, sai.year
+FROM silver_arms_industry sai
+JOIN silver_countries sc ON sc.country_id = sai.country_id;
+
+
+-- ============================================================================
+-- 7. PARTNERSHIP FLOW VIEW (for Tableau trade flow line maps)
+-- Doubles each partnership into 2 rows: source point + target point
+-- Connected by path_order for Tableau Line mark type
+-- ============================================================================
+CREATE VIEW vw_partnership_flow AS
+SELECT 
+    supplier_country_name + ' → ' + recipient_country_name AS partnership,
+    supplier_country_name,
+    recipient_country_name,
+    1 AS path_order,
+    source_lat AS latitude,
+    source_lng AS longitude,
+    total_deals,
+    partnership_strength
+FROM gold_defense_partnerships
+UNION ALL
+SELECT 
+    supplier_country_name + ' → ' + recipient_country_name AS partnership,
+    supplier_country_name,
+    recipient_country_name,
+    2 AS path_order,
+    target_lat AS latitude,
+    target_lng AS longitude,
+    total_deals,
+    partnership_strength
+FROM gold_defense_partnerships;
+
+-- ============================================================================
+-- 8. GOLD IMPORTS ANALYSIS
+-- Granular import data: recipient × supplier × weapon × year
+-- Enriched with political era context (recipient country), YoY growth,
+-- and import dependency percentage
+-- ============================================================================
+CREATE TABLE gold_imports_analysis (
+    recipient_country_id TINYINT,
+    recipient_name       VARCHAR(50),
+    supplier_country_id  TINYINT,
+    supplier_name        VARCHAR(50),
+    weapon_category      VARCHAR(50),
+    year                 INT,
+    deal_count           INT,
+    political_party      VARCHAR(50),
+    political_leader     VARCHAR(50),
+    era_label            VARCHAR(50),
+    yoy_growth_pct       DECIMAL(10,2),
+    import_dependency_pct DECIMAL(10,2),
+    PRIMARY KEY (recipient_country_id, supplier_country_id, weapon_category, year),
+    FOREIGN KEY (recipient_country_id) REFERENCES silver_countries(country_id),
+    FOREIGN KEY (supplier_country_id)  REFERENCES silver_countries(country_id)
+);
+
+-- Step 1: Insert base deal counts with political era mapping (recipient country)
+INSERT INTO gold_imports_analysis (
+    recipient_country_id, recipient_name, supplier_country_id, supplier_name,
+    weapon_category, year, deal_count, political_party, political_leader
+)
+SELECT
+    sat.recipient_country_id,
+    sc_rec.country_name,
+    sat.supplier_country_id,
+    sc_sup.country_name,
+    swc.category_name,
+    sat.delivery_year,
+    COUNT(sat.trade_id),
+    spe.political_party,
+    spe.leader_name
+FROM silver_arms_transfer sat
+JOIN silver_countries sc_rec ON sc_rec.country_id = sat.recipient_country_id
+JOIN silver_countries sc_sup ON sc_sup.country_id = sat.supplier_country_id
+JOIN silver_weapon_categories swc ON swc.weapon_category_id = sat.weapon_category_id
+LEFT JOIN (
+    SELECT country_id, political_party, leader_name, start_year, 
+           ISNULL(end_year, 2025) AS end_year,
+           ROW_NUMBER() OVER (PARTITION BY country_id, start_year ORDER BY start_year DESC) AS rn
+    FROM silver_political_eras
+) spe
+ON sat.recipient_country_id = spe.country_id 
+AND sat.delivery_year >= spe.start_year 
+AND sat.delivery_year < spe.end_year
+AND spe.rn = 1
+GROUP BY 
+    sat.recipient_country_id, sc_rec.country_name,
+    sat.supplier_country_id, sc_sup.country_name,
+    swc.category_name, sat.delivery_year,
+    spe.political_party, spe.leader_name;
+
+-- Step 2: Set era labels (recipient country political era)
+UPDATE gia
+SET era_label = CAST(spe.start_year AS VARCHAR) + '-' + CAST(ISNULL(spe.end_year, 2025) AS VARCHAR) 
+    + ' (' + spe.political_party + ')'
+FROM gold_imports_analysis gia
+JOIN silver_political_eras spe
+ON gia.recipient_country_id = spe.country_id
+AND gia.year >= spe.start_year
+AND gia.year < ISNULL(spe.end_year, 2026);
+
+-- Step 3: Calculate import dependency (% of country's imports from each supplier)
+UPDATE gia
+SET import_dependency_pct = CAST(gia.deal_count AS DECIMAL(10,2)) 
+    / NULLIF(sub.total_imports, 0) * 100
+FROM gold_imports_analysis gia
+INNER JOIN (
+    SELECT recipient_country_id, year, SUM(deal_count) AS total_imports
+    FROM gold_imports_analysis
+    GROUP BY recipient_country_id, year
+) sub
+ON gia.recipient_country_id = sub.recipient_country_id AND gia.year = sub.year;
+
+-- Step 4: Calculate YoY growth using LAG
+UPDATE gia
+SET yoy_growth_pct = sub.yoy
+FROM gold_imports_analysis gia
+INNER JOIN (
+    SELECT recipient_country_id, supplier_country_id, weapon_category, year,
+        (deal_count - LAG(deal_count, 1) OVER (
+            PARTITION BY recipient_country_id, supplier_country_id, weapon_category 
+            ORDER BY year))
+        / NULLIF(CAST(LAG(deal_count, 1) OVER (
+            PARTITION BY recipient_country_id, supplier_country_id, weapon_category 
+            ORDER BY year) AS DECIMAL(10,2)), 0)
+        * 100 AS yoy
+    FROM gold_imports_analysis
+) sub
+ON gia.recipient_country_id = sub.recipient_country_id 
+AND gia.supplier_country_id = sub.supplier_country_id
+AND gia.weapon_category = sub.weapon_category
+AND gia.year = sub.year;
