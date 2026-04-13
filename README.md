@@ -6,7 +6,9 @@ End-to-end defense analytics platform analyzing 25+ years of global arms trade, 
 
 ## Why This Project
 
-In 2016, India signed the Rafale jet deal — a $8.7 billion agreement that sparked national debate about defense spending transparency. As an Indian citizen, I wanted to answer a simple question: *where does the money actually go?* This dashboard connects arms trade flows, military budgets, conflict patterns, and social spending tradeoffs to give any informed citizen the tools to investigate defense policy decisions through data. I wanted to do this for a very long time. But needed to do properly too. I still feel like it can be done better :) 
+In 2016, India signed the Rafale jet deal — a $8.7 billion agreement that sparked national debate about defense spending transparency. As an Indian citizen, I wanted to answer a simple question: *where does the money actually go?* This dashboard connects arms trade flows, military budgets, conflict patterns, and social spending tradeoffs to give any informed citizen the tools to investigate defense policy decisions through data. 
+
+This might not be comprehensive as my previous or my upcoming projects. But I wanted to do this for a very long time. But needed to do properly too. Hence did, after my learning. I still feel like it can be done better :) 
 
 ## Tech Stack
 
