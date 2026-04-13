@@ -1,0 +1,282 @@
+-- ============================================================================
+-- SILVER LAYER: Cleaned & Standardized Tables
+-- Global Defense & Conflict Intelligence Dashboard
+--
+-- 5 cleaned tables + 4 reference tables (imported via wizard)
+-- 
+-- Key transformations:
+--   - Country name standardization via silver_countries mapping
+--   - Wide-to-long UNPIVOT on SIPRI milex data
+--   - Indicator PIVOT on World Bank data
+--   - Data type casting and validation flags
+--   - Weekly ACLED data aggregated to country-year level
+--
+-- Reference tables (created via Import Wizard, not scripted):
+--   - silver_countries (187 rows) — master country mapping across all sources
+--   - silver_calendar (8766 rows) — date dimension 2001-2024
+--   - silver_weapon_categories (11 rows) — weapon type lookup
+--   - silver_political_eras (49 rows) — government leadership by country
+-- ============================================================================
+
+
+-- ============================================================================
+-- 1. SILVER ARMS TRANSFER
+-- Source: bronze_arms_transfers
+-- Transforms: Country names → country_id, category → weapon_category_id,
+--             dates → year integers, estimated order year flag standardized
+-- ============================================================================
+CREATE TABLE silver_arms_transfer (
+    trade_id                INT PRIMARY KEY,
+    supplier_country_id     TINYINT,
+    recipient_country_id    TINYINT,
+    order_year              INT,
+    delivery_year           INT,
+    quantity                INT,
+    weapon_category_id      TINYINT,
+    designation             VARCHAR(50),
+    description             VARCHAR(50),
+    tiv_delivery            DECIMAL(10,2),
+    status                  VARCHAR(50),
+    local_production        BIT,
+    source_lat              DECIMAL(10,6),
+    source_lng              DECIMAL(10,6),
+    target_lat              DECIMAL(10,6),
+    target_lng              DECIMAL(10,6),
+    is_order_year_estimated BIT,
+    FOREIGN KEY (supplier_country_id)  REFERENCES silver_countries(country_id),
+    FOREIGN KEY (recipient_country_id) REFERENCES silver_countries(country_id),
+    FOREIGN KEY (weapon_category_id)   REFERENCES silver_weapon_categories(weapon_category_id)
+);
+
+INSERT INTO silver_arms_transfer (
+    trade_id, supplier_country_id, recipient_country_id,
+    order_year, delivery_year, quantity, weapon_category_id,
+    designation, description, source_lat, source_lng,
+    target_lat, target_lng, is_order_year_estimated
+)
+SELECT 
+    bat.trade_id,
+    sc_sup.country_id,
+    sc_rec.country_id,
+    YEAR(bat.order_date),
+    YEAR(bat.delivery_date),
+    bat.quantity,
+    swc.weapon_category_id,
+    bat.designation,
+    bat.description,
+    bat.source_lat,
+    bat.source_lng,
+    bat.target_lat,
+    bat.target_lng,
+    CASE WHEN bat.orderYrEst = 'True' THEN 1 ELSE 0 END
+FROM bronze_arms_transfer bat
+JOIN silver_countries sc_sup ON sc_sup.country_name = bat.source
+JOIN silver_countries sc_rec ON sc_rec.country_name = bat.target
+JOIN silver_weapon_categories swc ON swc.category_name = bat.category;
+
+
+-- ============================================================================
+-- 2. SILVER ARMS INDUSTRY
+-- Source: bronze_arms_industry
+-- Transforms: Country names → country_id, rank/revenue cast to proper types,
+--             percentage sign stripped from arms_revenue_pct
+-- ============================================================================
+CREATE TABLE silver_arms_industry (
+    rank              INT NOT NULL,
+    company_name      VARCHAR(50) NOT NULL,
+    country_id        TINYINT NOT NULL,
+    arms_revenue      DECIMAL(10,2),
+    total_revenue     DECIMAL(10,2),
+    arms_revenue_pct  DECIMAL(10,2),
+    year              INT NOT NULL,
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id),
+    PRIMARY KEY (company_name, year)
+);
+
+INSERT INTO silver_arms_industry (
+    rank, company_name, country_id,
+    arms_revenue, total_revenue, arms_revenue_pct, year
+)
+SELECT 
+    TRY_CAST(b.Rank_2024_Note_b AS INT),
+    b.Company_c,
+    sc.country_id,
+    TRY_CAST(b.Arms_Revenues_2024 AS DECIMAL(10,2)),
+    TRY_CAST(b.Total_Revenues_2024 AS DECIMAL(10,2)),
+    TRY_CAST(REPLACE(b.Arms_Revenues_as_a_of_total_revenues_2024, '%', '') AS DECIMAL(10,2)),
+    2024
+FROM bronze_arms_industry b
+JOIN silver_countries sc ON sc.country_name = b.country_d
+WHERE ISNUMERIC(b.Rank_2024_Note_b) = 1;
+
+
+-- ============================================================================
+-- 3. SILVER MILEX (Military Expenditure)
+-- Source: bronze_milex_current_usd, bronze_milex_share_gdp, 
+--         bronze_milex_share_govt_spending
+-- Transforms: Wide-to-long UNPIVOT (24 year columns → rows),
+--             3 metric types unified into single table,
+--             region headers and metadata rows filtered out
+-- ============================================================================
+CREATE TABLE silver_milex (
+    country_id   TINYINT,
+    year         INT,
+    metric_type  VARCHAR(50),
+    value        DECIMAL(16,6),
+    is_valid     BIT,
+    PRIMARY KEY (country_id, metric_type, year),
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id)
+);
+
+-- 3a. Insert current USD values
+INSERT INTO silver_milex (country_id, year, metric_type, value, is_valid)
+SELECT 
+    sc.country_id,
+    CAST(REPLACE(year_col, 'column', '') AS INT) + 1999,
+    'current_usd',
+    value,
+    CASE WHEN value IS NOT NULL THEN 1 ELSE 0 END
+FROM bronze_milex_current_usd
+UNPIVOT (
+    value FOR year_col IN (
+        column2, column3, column4, column5, column6, column7,
+        column8, column9, column10, column11, column12, column13,
+        column14, column15, column16, column17, column18, column19,
+        column20, column21, column22, column23, column24, column25
+    )
+) AS unpvt
+JOIN silver_countries sc ON sc.country_name = unpvt.column1
+WHERE ISNUMERIC(unpvt.column1) = 0 
+  AND unpvt.column1 != 'Country'
+  AND unpvt.column1 IS NOT NULL;
+
+-- 3b. Insert share of GDP values
+INSERT INTO silver_milex (country_id, year, metric_type, value, is_valid)
+SELECT 
+    sc.country_id,
+    CAST(REPLACE(year_col, 'column', '') AS INT) + 1999,
+    'share_of_gdp',
+    TRY_CAST(value AS DECIMAL(16,6)),
+    CASE WHEN TRY_CAST(value AS DECIMAL(16,6)) IS NOT NULL THEN 1 ELSE 0 END
+FROM bronze_milex_share_gdp
+UNPIVOT (
+    value FOR year_col IN (
+        column2, column3, column4, column5, column6, column7,
+        column8, column9, column10, column11, column12, column13,
+        column14, column15, column16, column17, column18, column19,
+        column20, column21, column22, column23, column24, column25
+    )
+) AS unpvt
+JOIN silver_countries sc ON sc.country_name = unpvt.column1
+WHERE ISNUMERIC(unpvt.column1) = 0 
+  AND unpvt.column1 != 'Country'
+  AND unpvt.column1 IS NOT NULL;
+
+-- 3c. Insert share of government spending values
+INSERT INTO silver_milex (country_id, year, metric_type, value, is_valid)
+SELECT 
+    sc.country_id,
+    CAST(REPLACE(year_col, 'column', '') AS INT) + 1999,
+    'share_of_govt_spending',
+    TRY_CAST(value AS DECIMAL(16,6)),
+    CASE WHEN TRY_CAST(value AS DECIMAL(16,6)) IS NOT NULL THEN 1 ELSE 0 END
+FROM bronze_milex_share_govt_spending
+UNPIVOT (
+    value FOR year_col IN (
+        column2, column3, column4, column5, column6, column7,
+        column8, column9, column10, column11, column12, column13,
+        column14, column15, column16, column17, column18, column19,
+        column20, column21, column22, column23, column24, column25
+    )
+) AS unpvt
+JOIN silver_countries sc ON sc.country_name = unpvt.column1
+WHERE ISNUMERIC(unpvt.column1) = 0 
+  AND unpvt.column1 != 'Country'
+  AND unpvt.column1 IS NOT NULL;
+
+
+-- ============================================================================
+-- 4. SILVER WORLD BANK
+-- Source: bronze_world_bank_indicators
+-- Transforms: Long-to-wide PIVOT (6 indicator codes → 6 columns),
+--             country_code mapped to country_id via silver_countries
+-- ============================================================================
+CREATE TABLE silver_world_bank (
+    country_id        TINYINT NOT NULL,
+    year              INT NOT NULL,
+    gdp_usd           DECIMAL(16,4),
+    education_pct_gdp DECIMAL(10,4),
+    healthcare_pct_gdp DECIMAL(10,4),
+    govt_debt_pct_gdp DECIMAL(10,4),
+    population        BIGINT,
+    milex_pct_gdp     DECIMAL(10,4),
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id),
+    PRIMARY KEY (country_id, year)
+);
+
+INSERT INTO silver_world_bank (
+    country_id, year, gdp_usd, education_pct_gdp,
+    healthcare_pct_gdp, govt_debt_pct_gdp, population, milex_pct_gdp
+)
+SELECT 
+    sc.country_id, 
+    pvt.year,
+    pvt.[NY.GDP.MKTP.CD],
+    pvt.[SE.XPD.TOTL.GD.ZS],
+    pvt.[SH.XPD.CHEX.GD.ZS],
+    pvt.[GC.DOD.TOTL.GD.ZS],
+    pvt.[SP.POP.TOTL],
+    pvt.[MS.MIL.XPND.GD.ZS]
+FROM (
+    SELECT country_name, indicator_code, year, value, country_code
+    FROM bronze_world_bank_indicators
+) AS src
+PIVOT (
+    MAX(value)
+    FOR indicator_code IN (
+        [NY.GDP.MKTP.CD],
+        [SE.XPD.TOTL.GD.ZS],
+        [SH.XPD.CHEX.GD.ZS],
+        [GC.DOD.TOTL.GD.ZS],
+        [SP.POP.TOTL],
+        [MS.MIL.XPND.GD.ZS]
+    )
+) AS pvt
+JOIN silver_countries sc ON sc.world_bank_code = pvt.country_code;
+
+
+-- ============================================================================
+-- 5. SILVER ACLED VIOLENCE
+-- Source: bronze_acled_conflict_events
+-- Transforms: Weekly data aggregated to country-year-event_type level,
+--             country names mapped to country_id, validation flag added
+-- ============================================================================
+CREATE TABLE silver_acled_violence (
+    country_id       TINYINT,
+    year             INT,
+    total_events     BIGINT,
+    total_fatalities BIGINT,
+    event_type       VARCHAR(50),
+    is_valid         BIT,
+    PRIMARY KEY (country_id, year, event_type),
+    FOREIGN KEY (country_id) REFERENCES silver_countries(country_id)
+);
+
+INSERT INTO silver_acled_violence (
+    country_id, year, total_events,
+    total_fatalities, event_type, is_valid
+)
+SELECT 
+    sc.country_id,
+    YEAR(bace.WEEK),
+    SUM(bace.EVENTS),
+    SUM(bace.FATALITIES),
+    bace.event_type,
+    CASE 
+        WHEN SUM(bace.EVENTS) IS NOT NULL 
+         AND SUM(bace.FATALITIES) IS NOT NULL 
+        THEN 1 ELSE 0 
+    END
+FROM bronze_acled_conflict_events bace
+JOIN silver_countries sc ON sc.country_name = bace.COUNTRY
+GROUP BY sc.country_id, YEAR(bace.WEEK), bace.event_type;
